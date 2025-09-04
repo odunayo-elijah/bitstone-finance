@@ -99,3 +99,104 @@
     ratio
   )
 )
+
+;; Compute accrued interest based on blocks elapsed
+(define-private (calculate-accrued-interest
+    (principal-amount uint)
+    (interest-rate uint)
+    (blocks-elapsed uint)
+  )
+  (let (
+      (daily-rate (/ interest-rate u365))
+      (block-rate (/ daily-rate u144)) ;; Assuming ~144 blocks per day
+      (total-interest (/ (* principal-amount block-rate blocks-elapsed) u100))
+    )
+    total-interest
+  )
+)
+
+;; Validate asset is supported by protocol
+(define-private (is-supported-asset (asset (string-ascii 3)))
+  (is-some (index-of SUPPORTED-ASSETS asset))
+)
+
+;; Validate price feed data
+(define-private (is-valid-price (price uint))
+  (and (> price u0) (<= price u10000000000))
+  ;; Reasonable price bounds
+)
+
+;; Check if loan requires liquidation
+(define-private (requires-liquidation (loan-id uint))
+  (match (map-get? loan-registry { loan-id: loan-id })
+    loan-data (match (map-get? asset-prices { asset: "BTC" })
+      btc-data (let ((current-ratio (get-collateral-ratio (get collateral-amount loan-data)
+          (get borrowed-amount loan-data) (get price btc-data)
+        )))
+        (<= current-ratio (var-get liquidation-threshold))
+      )
+      false
+    )
+    false
+  )
+)
+
+;; Execute liquidation process
+(define-private (execute-liquidation (loan-id uint))
+  (match (map-get? loan-registry { loan-id: loan-id })
+    loan-data (begin
+      (map-set loan-registry { loan-id: loan-id }
+        (merge loan-data { status: "liquidated" })
+      )
+      (var-set total-value-locked
+        (- (var-get total-value-locked) (get collateral-amount loan-data))
+      )
+      (ok true)
+    )
+    ERR-LOAN-NOT-FOUND
+  )
+)
+
+;; Remove loan from user's active positions
+(define-private (remove-user-loan
+    (borrower principal)
+    (loan-id uint)
+  )
+  (begin
+    (match (map-get? borrower-positions { borrower: borrower })
+      user-loans
+      (begin
+        (map-set borrower-positions { borrower: borrower } { active-loans: (filter (lambda (id) (not (is-eq id loan-id)))
+          (get active-loans user-loans)
+        ) }
+        )
+        true
+      )
+      true ;; If no existing positions, return true
+    )
+  )
+)
+
+;;                               PUBLIC FUNCTIONS                               
+
+;;                            PROTOCOL MANAGEMENT                              
+
+;; Initialize the BitStone Finance protocol
+(define-public (initialize-protocol)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (not (var-get protocol-active)) ERR-ALREADY-INITIALIZED)
+    (var-set protocol-active true)
+    (ok "BitStone Finance Protocol Initialized")
+  )
+)
+
+;; Update minimum collateral requirements
+(define-public (set-collateral-ratio (new-ratio uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (>= new-ratio u110) ERR-INVALID-AMOUNT)
+    (var-set minimum-collateral-ratio new-ratio)
+    (ok true)
+  )
+)
