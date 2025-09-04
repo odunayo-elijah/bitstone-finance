@@ -200,3 +200,88 @@
     (ok true)
   )
 )
+
+;; Update liquidation threshold
+(define-public (set-liquidation-threshold (new-threshold uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (and (>= new-threshold u105) (<= new-threshold u140))
+      ERR-INVALID-AMOUNT
+    )
+    (var-set liquidation-threshold new-threshold)
+    (ok true)
+  )
+)
+
+;; Update asset price feeds
+(define-public (update-asset-price
+    (asset (string-ascii 3))
+    (price uint)
+  )
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (is-supported-asset asset) ERR-UNSUPPORTED-ASSET)
+    (asserts! (is-valid-price price) ERR-INVALID-PRICE-FEED)
+    (map-set asset-prices { asset: asset } {
+      price: price,
+      last-update: stacks-block-height,
+    })
+    (ok true)
+  )
+)
+
+;;                             LENDING OPERATIONS                              
+
+;; Create new collateralized loan
+(define-public (create-loan
+    (collateral-amount uint)
+    (requested-amount uint)
+  )
+  (let (
+      (btc-price-data (unwrap! (map-get? asset-prices { asset: "BTC" }) ERR-INVALID-PRICE-FEED))
+      (btc-price (get price btc-price-data))
+      (collateral-value (* collateral-amount btc-price))
+      (required-collateral (* requested-amount (var-get minimum-collateral-ratio)))
+      (new-loan-id (+ (var-get loan-counter) u1))
+    )
+    (begin
+      (asserts! (var-get protocol-active) ERR-NOT-INITIALIZED)
+      (asserts! (> collateral-amount u0) ERR-INVALID-AMOUNT)
+      (asserts! (> requested-amount u0) ERR-INVALID-AMOUNT)
+      (asserts! (>= collateral-value required-collateral)
+        ERR-INSUFFICIENT-COLLATERAL
+      )
+
+      ;; Create loan record
+      (map-set loan-registry { loan-id: new-loan-id } {
+        borrower: tx-sender,
+        collateral-amount: collateral-amount,
+        borrowed-amount: requested-amount,
+        interest-rate: (var-get base-interest-rate),
+        creation-block: stacks-block-height,
+        last-update: stacks-block-height,
+        status: "active",
+      })
+
+      ;; Update user positions
+      (match (map-get? borrower-positions { borrower: tx-sender })
+        existing-positions (map-set borrower-positions { borrower: tx-sender } { active-loans: (unwrap!
+          (as-max-len? (append (get active-loans existing-positions) new-loan-id)
+            u10
+          )
+          ERR-INVALID-AMOUNT
+        ) }
+        )
+        (map-set borrower-positions { borrower: tx-sender } { active-loans: (list new-loan-id) })
+      )
+
+      ;; Update protocol metrics
+      (var-set total-value-locked
+        (+ (var-get total-value-locked) collateral-amount)
+      )
+      (var-set loan-counter new-loan-id)
+
+      (ok new-loan-id)
+    )
+  )
+)
