@@ -285,3 +285,103 @@
     )
   )
 )
+
+;; Repay loan and reclaim collateral
+(define-public (repay-loan
+    (loan-id uint)
+    (payment-amount uint)
+  )
+  (let (
+      (loan-data (unwrap! (map-get? loan-registry { loan-id: loan-id }) ERR-LOAN-NOT-FOUND))
+      (blocks-elapsed (- stacks-block-height (get last-update loan-data)))
+      (accrued-interest (calculate-accrued-interest (get borrowed-amount loan-data)
+        (get interest-rate loan-data) blocks-elapsed
+      ))
+      (total-due (+ (get borrowed-amount loan-data) accrued-interest))
+    )
+    (begin
+      (asserts! (is-eq (get status loan-data) "active") ERR-LOAN-INACTIVE)
+      (asserts! (is-eq (get borrower loan-data) tx-sender) ERR-UNAUTHORIZED)
+      (asserts! (>= payment-amount total-due) ERR-INVALID-AMOUNT)
+
+      ;; Mark loan as repaid
+      (map-set loan-registry { loan-id: loan-id }
+        (merge loan-data {
+          status: "repaid",
+          last-update: stacks-block-height,
+        })
+      )
+
+      ;; Release collateral
+      (var-set total-value-locked
+        (- (var-get total-value-locked) (get collateral-amount loan-data))
+      )
+
+      ;; Remove from user positions
+      (remove-user-loan tx-sender loan-id)
+
+      (ok {
+        collateral-released: (get collateral-amount loan-data),
+        interest-paid: accrued-interest,
+      })
+    )
+  )
+)
+
+;; Liquidate undercollateralized positions
+(define-public (liquidate-loan (loan-id uint))
+  (let ((loan-data (unwrap! (map-get? loan-registry { loan-id: loan-id }) ERR-LOAN-NOT-FOUND)))
+    (begin
+      (asserts! (is-eq (get status loan-data) "active") ERR-LOAN-INACTIVE)
+      (asserts! (requires-liquidation loan-id) ERR-INSUFFICIENT-COLLATERAL)
+
+      (execute-liquidation loan-id)
+    )
+  )
+)
+
+;;                              READ-ONLY FUNCTIONS                             
+
+;; Get detailed loan information
+(define-read-only (get-loan-info (loan-id uint))
+  (match (map-get? loan-registry { loan-id: loan-id })
+    loan-data (let (
+        (blocks-elapsed (- stacks-block-height (get last-update loan-data)))
+        (accrued-interest (calculate-accrued-interest (get borrowed-amount loan-data)
+          (get interest-rate loan-data) blocks-elapsed
+        ))
+      )
+      (ok (merge loan-data { current-interest-due: accrued-interest }))
+    )
+    ERR-LOAN-NOT-FOUND
+  )
+)
+
+;; Get user's loan portfolio
+(define-read-only (get-user-positions (user principal))
+  (default-to { active-loans: (list) }
+    (map-get? borrower-positions { user: user })
+  )
+)
+
+;; Get current asset price
+(define-read-only (get-asset-price (asset (string-ascii 3)))
+  (map-get? asset-prices { asset: asset })
+)
+
+;; Get protocol statistics
+(define-read-only (get-protocol-stats)
+  {
+    protocol-active: (var-get protocol-active),
+    total-value-locked: (var-get total-value-locked),
+    total-loans-issued: (var-get loan-counter),
+    minimum-collateral-ratio: (var-get minimum-collateral-ratio),
+    liquidation-threshold: (var-get liquidation-threshold),
+    base-interest-rate: (var-get base-interest-rate),
+  }
+)
+
+;; Get supported assets
+(define-read-only (get-supported-assets)
+  SUPPORTED-ASSETS
+)
