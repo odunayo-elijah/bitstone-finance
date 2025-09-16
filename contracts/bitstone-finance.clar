@@ -4,26 +4,6 @@
 ;; A sophisticated decentralized lending platform that transforms Bitcoin holdings 
 ;; into productive capital through secure collateralized loans, featuring advanced 
 ;; risk management algorithms and institutional-grade liquidation protection.
-;;
-;; Description:
-;; BitStone Finance pioneered the next evolution of Bitcoin-native DeFi by creating
-;; a trustless lending infrastructure that maximizes capital efficiency while 
-;; preserving Bitcoin's store-of-value properties. Our protocol delivers:
-;;
-;;   - Dynamic Risk Engine - AI-powered collateral monitoring with predictive
-;;     analytics for optimal position management
-;;   - Institutional Security - Multi-signature governance with time-locked
-;;     protocol upgrades and emergency pause mechanisms  
-;;   - Yield Optimization - Automated interest rate discovery based on supply,
-;;     demand, and market volatility conditions
-;;   - Bitcoin-First Design - Native integration with Stacks layer for seamless
-;;     Bitcoin collateral management without bridging risks
-;;   - Modular Architecture - Upgradeable contract system supporting future
-;;     asset classes and advanced financial instruments
-;;
-;; Built for the Bitcoin economy, BitStone Finance combines the security of 
-;; Bitcoin with the programmability of Stacks to deliver institutional-grade
-;; lending infrastructure that scales with the global Bitcoin adoption curve.
 
 ;;                               SYSTEM CONSTANTS                               
 
@@ -33,16 +13,10 @@
 (define-constant ERR-UNAUTHORIZED (err u100))
 (define-constant ERR-INSUFFICIENT-COLLATERAL (err u101))
 (define-constant ERR-INVALID-AMOUNT (err u102))
-(define-constant ERR-ALREADY-INITIALIZED (err u103))
 (define-constant ERR-NOT-INITIALIZED (err u104))
 (define-constant ERR-LOAN-NOT-FOUND (err u105))
 (define-constant ERR-LOAN-INACTIVE (err u106))
-(define-constant ERR-INVALID-LOAN-ID (err u107))
 (define-constant ERR-INVALID-PRICE-FEED (err u108))
-(define-constant ERR-UNSUPPORTED-ASSET (err u109))
-
-;; Supported Collateral Assets
-(define-constant SUPPORTED-ASSETS (list "BTC" "STX"))
 
 ;;                              PROTOCOL VARIABLES                              
 
@@ -69,13 +43,7 @@
   }
 )
 
-;; User loan tracking
-(define-map borrower-positions
-  { borrower: principal }
-  { active-loans: (list 10 uint) }
-)
-
-;; Asset price oracle
+;; Asset price oracle (simplified to BTC only)
 (define-map asset-prices
   { asset: (string-ascii 3) }
   {
@@ -92,11 +60,11 @@
     (loan-amount uint)
     (btc-price uint)
   )
-  (let (
-      (collateral-value (* collateral-amount btc-price))
-      (ratio (/ (* collateral-value u100) loan-amount))
+  (let ((collateral-value (* collateral-amount btc-price)))
+    (if (> loan-amount u0)
+      (/ (* collateral-value u100) loan-amount)
+      u0
     )
-    ratio
   )
 )
 
@@ -109,21 +77,9 @@
   (let (
       (daily-rate (/ interest-rate u365))
       (block-rate (/ daily-rate u144)) ;; Assuming ~144 blocks per day
-      (total-interest (/ (* principal-amount block-rate blocks-elapsed) u100))
     )
-    total-interest
+    (/ (* (* principal-amount block-rate) blocks-elapsed) u10000)
   )
-)
-
-;; Validate asset is supported by protocol
-(define-private (is-supported-asset (asset (string-ascii 3)))
-  (is-some (index-of SUPPORTED-ASSETS asset))
-)
-
-;; Validate price feed data
-(define-private (is-valid-price (price uint))
-  (and (> price u0) (<= price u10000000000))
-  ;; Reasonable price bounds
 )
 
 ;; Check if loan requires liquidation
@@ -141,42 +97,6 @@
   )
 )
 
-;; Execute liquidation process
-(define-private (execute-liquidation (loan-id uint))
-  (match (map-get? loan-registry { loan-id: loan-id })
-    loan-data (begin
-      (map-set loan-registry { loan-id: loan-id }
-        (merge loan-data { status: "liquidated" })
-      )
-      (var-set total-value-locked
-        (- (var-get total-value-locked) (get collateral-amount loan-data))
-      )
-      (ok true)
-    )
-    ERR-LOAN-NOT-FOUND
-  )
-)
-
-;; Remove loan from user's active positions
-(define-private (remove-user-loan
-    (borrower principal)
-    (loan-id uint)
-  )
-  (begin
-    (match (map-get? borrower-positions { borrower: borrower })
-      user-loans
-      (begin
-        (map-set borrower-positions { borrower: borrower } { active-loans: (filter (lambda (id) (not (is-eq id loan-id)))
-          (get active-loans user-loans)
-        ) }
-        )
-        true
-      )
-      true ;; If no existing positions, return true
-    )
-  )
-)
-
 ;;                               PUBLIC FUNCTIONS                               
 
 ;;                            PROTOCOL MANAGEMENT                              
@@ -185,7 +105,7 @@
 (define-public (initialize-protocol)
   (begin
     (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
-    (asserts! (not (var-get protocol-active)) ERR-ALREADY-INITIALIZED)
+    (asserts! (not (var-get protocol-active)) (err u103)) ;; ERR-ALREADY-INITIALIZED
     (var-set protocol-active true)
     (ok "BitStone Finance Protocol Initialized")
   )
@@ -201,28 +121,12 @@
   )
 )
 
-;; Update liquidation threshold
-(define-public (set-liquidation-threshold (new-threshold uint))
+;; Update asset price feeds (BTC only)
+(define-public (update-btc-price (price uint))
   (begin
     (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
-    (asserts! (and (>= new-threshold u105) (<= new-threshold u140))
-      ERR-INVALID-AMOUNT
-    )
-    (var-set liquidation-threshold new-threshold)
-    (ok true)
-  )
-)
-
-;; Update asset price feeds
-(define-public (update-asset-price
-    (asset (string-ascii 3))
-    (price uint)
-  )
-  (begin
-    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
-    (asserts! (is-supported-asset asset) ERR-UNSUPPORTED-ASSET)
-    (asserts! (is-valid-price price) ERR-INVALID-PRICE-FEED)
-    (map-set asset-prices { asset: asset } {
+    (asserts! (> price u0) ERR-INVALID-PRICE-FEED)
+    (map-set asset-prices { asset: "BTC" } {
       price: price,
       last-update: stacks-block-height,
     })
@@ -248,7 +152,7 @@
       (asserts! (var-get protocol-active) ERR-NOT-INITIALIZED)
       (asserts! (> collateral-amount u0) ERR-INVALID-AMOUNT)
       (asserts! (> requested-amount u0) ERR-INVALID-AMOUNT)
-      (asserts! (>= collateral-value required-collateral)
+      (asserts! (>= (* collateral-value u100) required-collateral)
         ERR-INSUFFICIENT-COLLATERAL
       )
 
@@ -262,18 +166,6 @@
         last-update: stacks-block-height,
         status: "active",
       })
-
-      ;; Update user positions
-      (match (map-get? borrower-positions { borrower: tx-sender })
-        existing-positions (map-set borrower-positions { borrower: tx-sender } { active-loans: (unwrap!
-          (as-max-len? (append (get active-loans existing-positions) new-loan-id)
-            u10
-          )
-          ERR-INVALID-AMOUNT
-        ) }
-        )
-        (map-set borrower-positions { borrower: tx-sender } { active-loans: (list new-loan-id) })
-      )
 
       ;; Update protocol metrics
       (var-set total-value-locked
@@ -317,9 +209,6 @@
         (- (var-get total-value-locked) (get collateral-amount loan-data))
       )
 
-      ;; Remove from user positions
-      (remove-user-loan tx-sender loan-id)
-
       (ok {
         collateral-released: (get collateral-amount loan-data),
         interest-paid: accrued-interest,
@@ -335,7 +224,14 @@
       (asserts! (is-eq (get status loan-data) "active") ERR-LOAN-INACTIVE)
       (asserts! (requires-liquidation loan-id) ERR-INSUFFICIENT-COLLATERAL)
 
-      (execute-liquidation loan-id)
+      ;; Execute liquidation
+      (map-set loan-registry { loan-id: loan-id }
+        (merge loan-data { status: "liquidated" })
+      )
+      (var-set total-value-locked
+        (- (var-get total-value-locked) (get collateral-amount loan-data))
+      )
+      (ok true)
     )
   )
 )
@@ -357,16 +253,9 @@
   )
 )
 
-;; Get user's loan portfolio
-(define-read-only (get-user-positions (user principal))
-  (default-to { active-loans: (list) }
-    (map-get? borrower-positions { user: user })
-  )
-)
-
-;; Get current asset price
-(define-read-only (get-asset-price (asset (string-ascii 3)))
-  (map-get? asset-prices { asset: asset })
+;; Get current BTC price
+(define-read-only (get-btc-price)
+  (map-get? asset-prices { asset: "BTC" })
 )
 
 ;; Get protocol statistics
@@ -379,9 +268,4 @@
     liquidation-threshold: (var-get liquidation-threshold),
     base-interest-rate: (var-get base-interest-rate),
   }
-)
-
-;; Get supported assets
-(define-read-only (get-supported-assets)
-  SUPPORTED-ASSETS
 )
